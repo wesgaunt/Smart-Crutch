@@ -2,7 +2,10 @@
 #include <Wire.h>
 #include <WiFiClientSecure.h>
 #include "FS.h"
- 
+
+#define SENSOR_SAMPLE_INTERVAL 10000 // Interval between individual IMU/Weight samples in microseconds
+#define DAILY_SAMPLES 5 // Number of gait samples per day
+
 #define MPU9250_ADDRESS 0x68
 #define MAG_ADDRESS 0x0C
  
@@ -19,7 +22,6 @@
 const char* host = "script.google.com";
 const int httpsPort = 443; 
 String SCRIPT_ID = "AKfycbyt1zJXaOvHo2_cz7Mfp6ivhan6XcGtnQO_UQzGzq6ECh3G4Zgj";
-
 const String SSIDS[2] = {"Fellas WiFi", "Closed Network"};
 const String PASSWORDS[2] = {"Silverton4ever", "portugal1"};
 const int NUM_NETWORKS = 2;
@@ -69,20 +71,42 @@ void connectToWifi() {
   }
 }
 
+bool connectToSecureHost(BearSSL::WiFiClientSecure *client, const char* host, const int port) {
+  int response = client->connect(host, port);
+  if (!response) {
+    Serial.print("Connection to ");
+    Serial.print(host);
+    Serial.print(" failed: Returned code ");
+    Serial.println(response);
+    return false;
+  } else {
+    Serial.println("Connection success");
+  }
+  return true;
+}
+
+bool connectToInsecureHost(WiFiClient *client, const char* host, const int port) {
+  int response = client->connect(host, port);
+  if (!response) {
+    Serial.print("Connection to ");
+    Serial.print(host);
+    Serial.print(" failed: Returned code ");
+    Serial.println(response);
+    return false;
+  } else {
+    Serial.println("Connection success");
+  }
+  return true;
+}
+
 void sendData(String line) {
   WiFiClientSecure client;
   client.setInsecure();
   Serial.print("Connecting to ");
   Serial.println(host);
-  int response = client.connect(host, httpsPort);
-  if (!response) {
-    Serial.print("Connection failed: Returned code ");
-    Serial.println(response);
+  if (!connectToSecureHost(&client, host, httpsPort)) {
     return;
-  } else {
-    Serial.println("Connection success");
   }
-
 
   String url = String("/macros/s/" + SCRIPT_ID + "/exec?data=" + line);
   Serial.print("requesting URL: ");
@@ -120,6 +144,23 @@ void I2CwriteByte(uint8_t Address, uint8_t Register, uint8_t Data) {
   Wire.write(Data);
   Wire.endTransmission();
 }
+
+String uploadCurrentTimestamp() {
+  WiFiClient client;
+  String response = "";
+  Serial.print("Connecting to worldclockapi.com");
+  if (!connectToInsecureHost(&client, "worldclockapi.com", 80)) {
+    return "Error connecting to worldclockapi.com";
+  }
+  client.println("GET /api/json/utc/now HTTP/1.1\r\nHost: worldclockapi.com\r\n");
+  client.println("Connection: close");
+  client.println();
+  String line = client.readStringUntil('"currentDateTime"');
+  line = client.readStringUntil(',');
+  line = client.readStringUntil(',');
+  Serial.println(line);
+  return(line);
+}
  
 void setup() {
   Serial.begin(115200);
@@ -144,96 +185,116 @@ void setup() {
   I2CwriteByte(MAG_ADDRESS,0x0A,0x16);
   
   pinMode(13, OUTPUT);
-  
-  Serial.println("Starting in 2 seconds");
-  delay(2000);
 
-  
   // Store initial time
   oldTime = micros();
   startTime = micros();
 }
 
-String line;
+void uploadDatetimeMicros() {
+  Serial.println("Uploading new datetime");
+  sendData(uploadCurrentTimestamp() + ",micros=" + micros());
+}
 
-// Counter
-long int cpt=0;
+bool crutchInUse() {
+  // Todo add weight sensor measurements to detect when crutch is in use
+  return true;
+}
+
+bool collectGaitSample() {
+  File appendLog = SPIFFS.open("/log.csv", "a");
+
+  // Todo increase to 200 samples
+  for(int n = 0; n <= 20; n++) {
+    newTime = micros();
+    while((newTime - oldTime) < SENSOR_SAMPLE_INTERVAL){
+      newTime = micros();
+    }
+    oldTime = micros();
+    // Read accelerometer and gyroscope
+    uint8_t Buf[14];
+    I2Cread(MPU9250_ADDRESS,0x3B,14,Buf);
+    
+    // Create 16 bits values from 8 bits data
+    // Accelerometer
+    int16_t ax=-(Buf[0]<<8 | Buf[1]);
+    int16_t ay=-(Buf[2]<<8 | Buf[3]);
+    int16_t az=Buf[4]<<8 | Buf[5];
+    
+    // Gyroscope
+    int16_t gx=-(Buf[8]<<8 | Buf[9]);
+    int16_t gy=-(Buf[10]<<8 | Buf[11]);
+    int16_t gz=Buf[12]<<8 | Buf[13];
+
+    File appendLog = SPIFFS.open("/log.csv", "a");
+    appendLog.print(micros());
+    appendLog.print(',');
+    appendLog.print(ax);
+    appendLog.print(',');
+    appendLog.print(ay);
+    appendLog.print(',');
+    appendLog.print(az);
+    appendLog.print(',');
+    appendLog.print(gx);
+    appendLog.print(',');
+    appendLog.print(gy);
+    appendLog.print(',');
+    appendLog.print(gz);
+    appendLog.print('|');
+  }
+  appendLog.close();
+}
+
+bool wifiConnected() {
+  //Todo check if wifi connected
+  return true;
+}
+
+void clearData() {
+  File writeLog = SPIFFS.open("/log.csv", "w");
+  writeLog.close();
+}
+
+void uploadNewData() {
+  Serial.println("Uploading new data");
+  File readLog = SPIFFS.open("/log.csv", "r");
+  String line = readLog.readStringUntil('|');
+  while(line.length() > 0) {
+    Serial.println(line);
+    sendData(line);
+    line = readLog.readStringUntil('|');
+  }
+  readLog.close();
+  bool success = true; //Todo confirm data uploaded before deleting
+  if(success) {
+    clearData();
+  }
+}
+
+int samples_today = 0;
+bool uploaded_time_stamp = false;
+bool new_data = true;
 
 void loop() {
-  if (cpt >= 200) {
-    Serial.println("START IF");
-    Serial.println(cpt);
-    File readLog = SPIFFS.open("/log.csv", "r");
-    line = readLog.readStringUntil('|');
-    while(line.length() > 0) {
-      Serial.println("Here1");
-      Serial.println(line);
-      sendData(line);
-      line = readLog.readStringUntil('|');
+  if (crutchInUse() && samples_today < DAILY_SAMPLES) {
+    collectGaitSample();
+    samples_today++;
+    Serial.print("Sample collected, samples today = ");
+    Serial.println(samples_today);
+    new_data = true;
+  }
+
+  if (wifiConnected) {
+    
+    if (new_data) {
+      uploadNewData();
     }
-    sendData("------------------");
-    readLog.close();
-    File writeLog = SPIFFS.open("/log.csv", "w");
-    writeLog.close();
-    Serial.println("Here2");
-    cpt = 0;
+
+    if (!uploaded_time_stamp) {
+      uploadDatetimeMicros();
+      uploaded_time_stamp = true; // Todo check if upload successful
+    }
+    new_data = false;
   }
-  
-
-  
-  cpt++;
-  //wait for a bit, 10ms
-  newTime = micros();
-  while((newTime - oldTime) < 10000){
-    newTime = micros();
-  }
-  oldTime = micros();
-
-// ____________________________________
-// ::: accelerometer and gyroscope :::
- 
-// Read accelerometer and gyroscope
-uint8_t Buf[14];
-I2Cread(MPU9250_ADDRESS,0x3B,14,Buf);
- 
-// Create 16 bits values from 8 bits data
- 
-// Accelerometer
-int16_t ax=-(Buf[0]<<8 | Buf[1]);
-int16_t ay=-(Buf[2]<<8 | Buf[3]);
-int16_t az=Buf[4]<<8 | Buf[5];
- 
-// Gyroscope
-int16_t gx=-(Buf[8]<<8 | Buf[9]);
-int16_t gy=-(Buf[10]<<8 | Buf[11]);
-int16_t gz=Buf[12]<<8 | Buf[13];
-
-
-File appendLog = SPIFFS.open("/log.csv", "a");
-appendLog.print(micros());
-appendLog.print(',');
-appendLog.print(ax);
-appendLog.print(',');
-appendLog.print(ay);
-appendLog.print(',');
-appendLog.print(az);
-appendLog.print(',');
-appendLog.print(gx);
-appendLog.print(',');
-appendLog.print(gy);
-appendLog.print(',');
-appendLog.print(gz);
-appendLog.print('|');
-appendLog.close();
- 
-
- 
- 
-// End of line
-Serial.println("");
-// delay(100); 
-
-  // sendData();
-
 
 }
