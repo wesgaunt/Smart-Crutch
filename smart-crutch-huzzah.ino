@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <WiFiClientSecure.h>
 #include "FS.h"
+#include "HX711.h"
 
 #define SENSOR_SAMPLE_INTERVAL 10000 // Interval between individual IMU/Weight samples in microseconds
 #define DAILY_SAMPLES 5 // Number of gait samples per day
@@ -25,6 +26,14 @@ String SCRIPT_ID = "AKfycbyt1zJXaOvHo2_cz7Mfp6ivhan6XcGtnQO_UQzGzq6ECh3G4Zgj";
 const String SSIDS[2] = {"Fellas WiFi", "Closed Network"};
 const String PASSWORDS[2] = {"Silverton4ever", "portugal1"};
 const int NUM_NETWORKS = 2;
+
+// HX711 circuit wiring
+const int LOADCELL_DOUT_PIN = 2;
+const int LOADCELL_SCK_PIN = 16;
+HX711 scale; //This will be teh HX711 in use
+float current_force;
+const float scale_multiplier = 2280.f;
+
  
 const char* ssid     = "Fellas WiFi";
 const char* password = "Silverton4ever";
@@ -164,6 +173,8 @@ String uploadCurrentTimestamp() {
  
 void setup() {
   Serial.begin(115200);
+ 
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN); //setup weight sensor ith gain of 128 on channel A
   connectToWifi();
   Wire.begin();
   SPIFFS.begin();
@@ -189,6 +200,11 @@ void setup() {
   // Store initial time
   oldTime = micros();
   startTime = micros();
+  //******************************************//
+ 
+  scale.tare(); //set to zero.
+ //Becca to set - needs a calibration parameter
+  scale.set_scale(scale_multiplier);//this will have to be calvualted beforehand       
 }
 
 void uploadDatetimeMicros() {
@@ -198,6 +214,7 @@ void uploadDatetimeMicros() {
 
 bool crutchInUse() {
   // Todo add weight sensor measurements to detect when crutch is in use
+ current_force = scale.get_units(5);       //gets 5 readings and 
   return true;
 }
 
